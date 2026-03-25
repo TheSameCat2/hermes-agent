@@ -38,6 +38,7 @@ MAX_CONCURRENT_CHILDREN = 3
 MAX_DEPTH = 2  # parent (0) -> child (1) -> grandchild rejected (2)
 DEFAULT_MAX_ITERATIONS = 50
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
+_RUNTIME_UNSET = object()
 
 
 def check_delegate_requirements() -> bool:
@@ -160,6 +161,8 @@ def _build_child_agent(
     override_base_url: Optional[str] = None,
     override_api_key: Optional[str] = None,
     override_api_mode: Optional[str] = None,
+    override_command: Any = _RUNTIME_UNSET,
+    override_args: Any = _RUNTIME_UNSET,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -201,8 +204,14 @@ def _build_child_agent(
     effective_base_url = override_base_url or parent_agent.base_url
     effective_api_key = override_api_key or parent_api_key
     effective_api_mode = override_api_mode or getattr(parent_agent, "api_mode", None)
-    effective_acp_command = getattr(parent_agent, "acp_command", None)
-    effective_acp_args = list(getattr(parent_agent, "acp_args", []) or [])
+    if override_command is _RUNTIME_UNSET:
+        effective_acp_command = getattr(parent_agent, "acp_command", None)
+    else:
+        effective_acp_command = override_command
+    if override_args is _RUNTIME_UNSET:
+        effective_acp_args = list(getattr(parent_agent, "acp_args", []) or [])
+    else:
+        effective_acp_args = list(override_args or [])
 
     child = AIAgent(
         base_url=effective_base_url,
@@ -399,6 +408,7 @@ def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
     toolsets: Optional[List[str]] = None,
+    route: Optional[str] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     parent_agent=None,
@@ -430,21 +440,11 @@ def delegate_task(
     default_max_iter = cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
     effective_max_iter = max_iterations or default_max_iter
 
-    # Resolve delegation credentials (provider:model pair).
-    # When delegation.provider is configured, this resolves the full credential
-    # bundle (base_url, api_key, api_mode) via the same runtime provider system
-    # used by CLI/gateway startup.  When unconfigured, returns None values so
-    # children inherit from the parent.
-    try:
-        creds = _resolve_delegation_credentials(cfg, parent_agent)
-    except ValueError as exc:
-        return json.dumps({"error": str(exc)})
-
     # Normalize to task list
     if tasks and isinstance(tasks, list):
         task_list = tasks[:MAX_CONCURRENT_CHILDREN]
     elif goal and isinstance(goal, str) and goal.strip():
-        task_list = [{"goal": goal, "context": context, "toolsets": toolsets}]
+        task_list = [{"goal": goal, "context": context, "toolsets": toolsets, "route": route}]
     else:
         return json.dumps({"error": "Provide either 'goal' (single task) or 'tasks' (batch)."})
 
@@ -475,6 +475,13 @@ def delegate_task(
     children = []
     try:
         for i, t in enumerate(task_list):
+            task_route = str(t.get("route") or route or "").strip()
+            try:
+                selected_cfg = _select_delegation_config(cfg, task_route)
+                creds = _resolve_delegation_credentials(selected_cfg, parent_agent)
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
+
             child = _build_child_agent(
                 task_index=i, goal=t["goal"], context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets, model=creds["model"],
@@ -482,6 +489,8 @@ def delegate_task(
                 override_provider=creds["provider"], override_base_url=creds["base_url"],
                 override_api_key=creds["api_key"],
                 override_api_mode=creds["api_mode"],
+                override_command=creds.get("command", _RUNTIME_UNSET),
+                override_args=creds.get("args", _RUNTIME_UNSET),
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -609,6 +618,8 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "base_url": configured_base_url,
             "api_key": api_key,
             "api_mode": api_mode,
+            "command": None,
+            "args": [],
         }
 
     if not configured_provider:
@@ -651,13 +662,39 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     }
 
 
+def _select_delegation_config(cfg: dict, route: Optional[str]) -> dict:
+    """Return the effective delegation config for a top-level/per-task route."""
+    normalized_route = str(route or "").strip()
+    if not normalized_route or normalized_route == "inherit":
+        return cfg
+
+    routes = cfg.get("routes") or {}
+    if not isinstance(routes, dict):
+        raise ValueError("delegation.routes must be a mapping of route names to configs.")
+
+    route_cfg = routes.get(normalized_route)
+    if not isinstance(route_cfg, dict):
+        available = ", ".join(
+            sorted(name for name, value in routes.items() if isinstance(name, str) and isinstance(value, dict))
+        ) or "none"
+        raise ValueError(
+            f"Unknown delegation route '{normalized_route}'. "
+            f"Configure delegation.routes.{normalized_route} in config.yaml. "
+            f"Available routes: {available}."
+        )
+
+    merged_cfg = {k: v for k, v in cfg.items() if k != "routes"}
+    merged_cfg.update(route_cfg)
+    return merged_cfg
+
+
 def _load_config() -> dict:
     """Load delegation config from CLI_CONFIG or persistent config.
 
     Checks the runtime config (cli.py CLI_CONFIG) first, then falls back
     to the persistent config (hermes_cli/config.py load_config()) so that
-    ``delegation.model`` / ``delegation.provider`` are picked up regardless
-    of the entry point (CLI, gateway, cron).
+    ``delegation.model`` / ``delegation.provider`` / ``delegation.routes``
+    are picked up regardless of the entry point (CLI, gateway, cron).
     """
     try:
         from cli import CLI_CONFIG
@@ -735,6 +772,15 @@ DELEGATE_TASK_SCHEMA = {
                     "full-stack tasks."
                 ),
             },
+            "route": {
+                "type": "string",
+                "description": (
+                    "Optional named subagent route from delegation.routes in config "
+                    "(for example 'cheap', 'strong', or 'code'). Use this when you "
+                    "want the parent agent to choose an abstract route instead of "
+                    "hardcoding provider/model IDs."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -747,6 +793,13 @@ DELEGATE_TASK_SCHEMA = {
                             "items": {"type": "string"},
                             "description": "Toolsets for this specific task",
                         },
+                        "route": {
+                            "type": "string",
+                            "description": (
+                                "Optional route override for this task only. When set, "
+                                "it overrides the top-level route."
+                            ),
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -754,7 +807,8 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Batch mode: up to 3 tasks to run in parallel. Each gets "
                     "its own subagent with isolated context and terminal session. "
-                    "When provided, top-level goal/context/toolsets are ignored."
+                    "When provided, top-level goal/context/toolsets are ignored. "
+                    "Top-level route still acts as the default route unless a task overrides it."
                 ),
             },
             "max_iterations": {
@@ -781,6 +835,7 @@ registry.register(
         goal=args.get("goal"),
         context=args.get("context"),
         toolsets=args.get("toolsets"),
+        route=args.get("route"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
         parent_agent=kw.get("parent_agent")),

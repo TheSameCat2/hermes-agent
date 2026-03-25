@@ -27,6 +27,7 @@ from tools.delegate_tool import (
     _build_child_system_prompt,
     _strip_blocked_tools,
     _resolve_delegation_credentials,
+    _select_delegation_config,
 )
 
 
@@ -38,6 +39,8 @@ def _make_mock_parent(depth=0):
     parent.provider = "openrouter"
     parent.api_mode = "chat_completions"
     parent.model = "anthropic/claude-sonnet-4"
+    parent.acp_command = None
+    parent.acp_args = []
     parent.platform = "cli"
     parent.providers_allowed = None
     parent.providers_ignored = None
@@ -61,8 +64,10 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        self.assertIn("route", props)
         self.assertIn("max_iterations", props)
         self.assertEqual(props["tasks"]["maxItems"], 3)
+        self.assertIn("route", props["tasks"]["items"]["properties"])
 
 
 class TestChildSystemPrompt(unittest.TestCase):
@@ -137,6 +142,124 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(result["results"][0]["status"], "completed")
         self.assertEqual(result["results"][0]["summary"], "Done!")
         mock_run.assert_called_once()
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_top_level_route_uses_named_route_config(self, mock_creds, mock_cfg):
+        """Top-level route should select a named delegation.routes config."""
+        mock_cfg.return_value = {
+            "routes": {
+                "cheap": {
+                    "model": "openai/gpt-5.4-mini",
+                    "provider": "openrouter",
+                }
+            }
+        }
+        mock_creds.return_value = {
+            "model": "openai/gpt-5.4-mini",
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "***",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent()
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Fix tests", route="cheap", parent_agent=parent)
+
+        selected_cfg = mock_creds.call_args.args[0]
+        self.assertEqual(selected_cfg["model"], "openai/gpt-5.4-mini")
+        self.assertEqual(selected_cfg["provider"], "openrouter")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_task_route_overrides_top_level_route_in_batch(self, mock_creds, mock_cfg):
+        """Per-task route should override the top-level route in batch mode."""
+        mock_cfg.return_value = {
+            "routes": {
+                "cheap": {"model": "openai/gpt-5.4-mini", "provider": "openrouter"},
+                "strong": {"model": "openai/gpt-5.4", "provider": "openrouter"},
+            }
+        }
+
+        def _creds_side_effect(cfg, _parent):
+            return {
+                "model": cfg.get("model"),
+                "provider": cfg.get("provider"),
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": f"key-for-{cfg.get('model')}",
+                "api_mode": "chat_completions",
+            }
+
+        mock_creds.side_effect = _creds_side_effect
+        parent = _make_mock_parent()
+
+        with patch("tools.delegate_tool._build_child_agent") as mock_build, \
+             patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_build.return_value = MagicMock()
+            mock_run.return_value = {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "Done",
+                "api_calls": 1,
+                "duration_seconds": 1.0,
+            }
+
+            delegate_task(
+                route="cheap",
+                tasks=[
+                    {"goal": "Summarize failures"},
+                    {"goal": "Root-cause race", "route": "strong"},
+                ],
+                parent_agent=parent,
+            )
+
+        self.assertEqual(mock_build.call_args_list[0].kwargs["model"], "openai/gpt-5.4-mini")
+        self.assertEqual(mock_build.call_args_list[1].kwargs["model"], "openai/gpt-5.4")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_route_can_override_acp_command_and_args(self, mock_creds, mock_cfg):
+        """Route-selected runtimes should be able to override ACP command/args."""
+        mock_cfg.return_value = {
+            "routes": {
+                "code": {
+                    "model": "copilot/gpt-5",
+                    "provider": "copilot-acp",
+                }
+            }
+        }
+        mock_creds.return_value = {
+            "model": "copilot/gpt-5",
+            "provider": "copilot-acp",
+            "base_url": "http://127.0.0.1:8765/v1",
+            "api_key": "",
+            "api_mode": "chat_completions",
+            "command": "copilot-acp",
+            "args": ["serve", "--stdio"],
+        }
+        parent = _make_mock_parent()
+        parent.acp_command = "parent-acp"
+        parent.acp_args = ["parent", "args"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Implement feature", route="code", parent_agent=parent)
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["acp_command"], "copilot-acp")
+            self.assertEqual(kwargs["acp_args"], ["serve", "--stdio"])
 
     @patch("tools.delegate_tool._run_single_child")
     def test_batch_mode(self, mock_run):
@@ -518,6 +641,27 @@ class TestBlockedTools(unittest.TestCase):
         self.assertEqual(MAX_DEPTH, 2)
 
 
+class TestDelegationRouteSelection(unittest.TestCase):
+    def test_route_inherits_root_delegation_fields(self):
+        cfg = {
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "***",
+            "routes": {
+                "cheap": {
+                    "model": "openai/gpt-5.4-mini",
+                }
+            },
+        }
+
+        selected = _select_delegation_config(cfg, "cheap")
+
+        self.assertEqual(selected["model"], "openai/gpt-5.4-mini")
+        self.assertEqual(selected["provider"], "openrouter")
+        self.assertEqual(selected["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(selected["api_key"], cfg["api_key"])
+
+
 class TestDelegationCredentialResolution(unittest.TestCase):
     """Tests for provider:model credential resolution in delegation config."""
 
@@ -593,7 +737,11 @@ class TestDelegationCredentialResolution(unittest.TestCase):
             "model": "qwen2.5-coder",
             "base_url": "http://localhost:1234/v1",
         }
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "env-openrouter-key"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"OPENROUTER_API_KEY": "env-openrouter-key", "OPENAI_API_KEY": ""},
+            clear=False,
+        ):
             with self.assertRaises(ValueError) as ctx:
                 _resolve_delegation_credentials(cfg, parent)
         self.assertIn("OPENAI_API_KEY", str(ctx.exception))

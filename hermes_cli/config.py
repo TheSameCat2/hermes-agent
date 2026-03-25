@@ -317,6 +317,7 @@ DEFAULT_CONFIG = {
         "provider": "",    # e.g. "openrouter" (empty = inherit parent provider + credentials)
         "base_url": "",    # direct OpenAI-compatible endpoint for subagents
         "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
+        "routes": {},       # named per-subagent routes: cheap/strong/code/etc.
     },
 
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
@@ -380,7 +381,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 10,
+    "_config_version": 11,
 }
 
 # =============================================================================
