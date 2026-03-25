@@ -20,6 +20,7 @@ Public API (signatures preserved from the original 2,400-line version):
     check_tool_availability(quiet) -> tuple
 """
 
+import copy
 import json
 import asyncio
 import logging
@@ -227,6 +228,63 @@ _LEGACY_TOOLSET_MAP = {
 }
 
 
+def _infer_delegate_route_hint(route_name: str) -> str:
+    """Return a short usage hint for a named delegation route."""
+    normalized = (route_name or "").strip().lower()
+    if any(token in normalized for token in ("cheap", "light", "mini", "fast", "flash", "small")):
+        return "lower-cost / faster route for search-heavy, summarization, triage, and first-pass delegated work"
+    if any(token in normalized for token in ("strong", "heavy", "deep", "big", "max", "smart")):
+        return "higher-capability route for ambiguous debugging, architecture, risky edits, and root-cause analysis"
+    if any(token in normalized for token in ("code", "coder", "coding", "implement", "build", "edit")):
+        return "coding-focused route for implementation-heavy tasks, refactors, and test-writing"
+    if any(token in normalized for token in ("research", "docs", "search", "web")):
+        return "research-focused route for documentation lookup and broad information gathering"
+    return "configured delegation route"
+
+
+def _describe_delegate_route(route_name: str, route_cfg: Any) -> str:
+    """Build a compact human/model-facing line for a named route."""
+    description = None
+    if isinstance(route_cfg, dict):
+        raw_desc = route_cfg.get("description")
+        if isinstance(raw_desc, str) and raw_desc.strip():
+            description = raw_desc.strip()
+
+    return f"- {route_name} — {description or _infer_delegate_route_hint(route_name)}"
+
+
+def _build_delegate_route_guidance(routes: Any) -> Optional[Dict[str, str]]:
+    """Return dynamic guidance strings for delegate_task when named routes exist."""
+    if not isinstance(routes, dict):
+        return None
+
+    valid_routes = [
+        (name, cfg) for name, cfg in routes.items()
+        if isinstance(name, str) and name.strip() and isinstance(cfg, dict)
+    ]
+    if not valid_routes:
+        return None
+
+    route_lines = [_describe_delegate_route(name.strip(), cfg) for name, cfg in valid_routes]
+    route_names = ", ".join(name.strip() for name, _ in valid_routes)
+
+    shared = (
+        "Named routes let you choose a configured subagent profile instead of hardcoding provider/model IDs.\n"
+        "Prefer cheap/light routes for repo spelunking, summaries, docs lookup, log/test triage, and other low-risk first-pass tasks.\n"
+        "Prefer strong/heavy routes for ambiguous debugging, architecture, risky edits, and cross-file root-cause analysis.\n"
+        "Prefer code/coder routes for implementation-heavy coding and refactors when available.\n"
+        "Available named routes in this session:\n"
+        + "\n".join(route_lines)
+    )
+
+    route_property = (
+        f"Available routes in this session: {route_names}. "
+        "Pick a route when the delegated task clearly fits one of these profiles; otherwise omit it and inherit the default behavior."
+    )
+
+    return {"description": shared, "route_property": route_property}
+
+
 # =============================================================================
 # get_tool_definitions  (the main schema provider)
 # =============================================================================
@@ -339,6 +397,51 @@ def get_tool_definitions(
                         "function": {**td["function"], "description": desc},
                     }
                     break
+
+    # Enrich delegate_task with named-route guidance when delegation.routes is
+    # configured. This helps the parent model choose cheap/strong/code routes
+    # intentionally instead of ignoring the route field.
+    if "delegate_task" in available_tool_names:
+        try:
+            from tools.delegate_tool import _load_config as _load_delegation_config
+
+            delegation_cfg = _load_delegation_config() or {}
+            route_guidance = _build_delegate_route_guidance(delegation_cfg.get("routes"))
+            if route_guidance:
+                for i, td in enumerate(filtered_tools):
+                    if td.get("function", {}).get("name") != "delegate_task":
+                        continue
+
+                    dynamic_schema = copy.deepcopy(td["function"])
+                    desc = dynamic_schema.get("description", "")
+                    extra_desc = route_guidance["description"]
+                    if extra_desc not in desc:
+                        dynamic_schema["description"] = f"{desc}\n\n{extra_desc}" if desc else extra_desc
+
+                    props = dynamic_schema.setdefault("parameters", {}).setdefault("properties", {})
+                    route_prop = props.get("route")
+                    if isinstance(route_prop, dict):
+                        route_desc = route_prop.get("description", "")
+                        extra_route_desc = route_guidance["route_property"]
+                        if extra_route_desc not in route_desc:
+                            route_prop["description"] = f"{route_desc} {extra_route_desc}".strip()
+
+                    task_route_prop = (
+                        props.get("tasks", {})
+                        .get("items", {})
+                        .get("properties", {})
+                        .get("route")
+                    )
+                    if isinstance(task_route_prop, dict):
+                        task_route_desc = task_route_prop.get("description", "")
+                        extra_route_desc = route_guidance["route_property"]
+                        if extra_route_desc not in task_route_desc:
+                            task_route_prop["description"] = f"{task_route_desc} {extra_route_desc}".strip()
+
+                    filtered_tools[i] = {"type": "function", "function": dynamic_schema}
+                    break
+        except Exception:
+            pass
 
     if not quiet_mode:
         if filtered_tools:

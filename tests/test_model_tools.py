@@ -6,6 +6,7 @@ import pytest
 from model_tools import (
     handle_function_call,
     get_all_tool_names,
+    get_tool_definitions,
     get_toolset_for_tool,
     _AGENT_LOOP_TOOLS,
     _LEGACY_TOOLSET_MAP,
@@ -101,3 +102,47 @@ class TestBackwardCompat:
     def test_tool_to_toolset_map(self):
         assert isinstance(TOOL_TO_TOOLSET_MAP, dict)
         assert len(TOOL_TO_TOOLSET_MAP) > 0
+
+
+class TestDynamicDelegateRouteGuidance:
+    def _delegate_schema(self):
+        tools = get_tool_definitions(enabled_toolsets=["delegation"], quiet_mode=True)
+        delegate = next(t for t in tools if t["function"]["name"] == "delegate_task")
+        return delegate["function"]
+
+    def test_delegate_schema_lists_available_named_routes(self, monkeypatch):
+        monkeypatch.setattr(
+            "tools.delegate_tool._load_config",
+            lambda: {
+                "routes": {
+                    "cheap": {"model": "openai/gpt-5.4-mini"},
+                    "strong": {"model": "openai/gpt-5.4"},
+                    "code": {"model": "copilot/gpt-5"},
+                }
+            },
+        )
+
+        schema = self._delegate_schema()
+        desc = schema["description"]
+        route_desc = schema["parameters"]["properties"]["route"]["description"]
+
+        assert "Available named routes in this session" in desc
+        assert "cheap" in desc and "strong" in desc and "code" in desc
+        assert "cheap" in route_desc and "strong" in route_desc and "code" in route_desc
+
+    def test_delegate_schema_includes_route_selection_heuristics(self, monkeypatch):
+        monkeypatch.setattr(
+            "tools.delegate_tool._load_config",
+            lambda: {
+                "routes": {
+                    "cheap": {"model": "openai/gpt-5.4-mini"},
+                    "strong": {"model": "openai/gpt-5.4"},
+                }
+            },
+        )
+
+        schema = self._delegate_schema()
+        desc = schema["description"]
+
+        assert "Prefer cheap/light routes for" in desc
+        assert "Prefer strong/heavy routes for" in desc
