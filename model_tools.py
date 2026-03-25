@@ -253,7 +253,10 @@ def _describe_delegate_route(route_name: str, route_cfg: Any) -> str:
     return f"- {route_name} — {description or _infer_delegate_route_hint(route_name)}"
 
 
-def _build_delegate_route_guidance(routes: Any) -> Optional[Dict[str, str]]:
+def _build_delegate_route_guidance(
+    routes: Any,
+    default_route: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
     """Return dynamic guidance strings for delegate_task when named routes exist."""
     if not isinstance(routes, dict):
         return None
@@ -267,19 +270,30 @@ def _build_delegate_route_guidance(routes: Any) -> Optional[Dict[str, str]]:
 
     route_lines = [_describe_delegate_route(name.strip(), cfg) for name, cfg in valid_routes]
     route_names = ", ".join(name.strip() for name, _ in valid_routes)
+    normalized_default = str(default_route or "").strip()
+    default_line = (
+        f"\nDefault route when omitted in this session: {normalized_default}."
+        if normalized_default else ""
+    )
+    route_property_tail = (
+        f" Omit route to use the default route ({normalized_default})."
+        if normalized_default else
+        " Pick a route when the delegated task clearly fits one of these profiles; otherwise omit it and inherit the default behavior."
+    )
 
     shared = (
         "Named routes let you choose a configured subagent profile instead of hardcoding provider/model IDs.\n"
         "Prefer cheap/light routes for repo spelunking, summaries, docs lookup, log/test triage, and other low-risk first-pass tasks.\n"
         "Prefer strong/heavy routes for ambiguous debugging, architecture, risky edits, and cross-file root-cause analysis.\n"
-        "Prefer code/coder routes for implementation-heavy coding and refactors when available.\n"
+        "Prefer code/coder routes for implementation-heavy coding and refactors when available."
+        f"{default_line}\n"
         "Available named routes in this session:\n"
         + "\n".join(route_lines)
     )
 
     route_property = (
-        f"Available routes in this session: {route_names}. "
-        "Pick a route when the delegated task clearly fits one of these profiles; otherwise omit it and inherit the default behavior."
+        f"Available routes in this session: {route_names}."
+        f"{route_property_tail}"
     )
 
     return {"description": shared, "route_property": route_property}
@@ -406,7 +420,10 @@ def get_tool_definitions(
             from tools.delegate_tool import _load_config as _load_delegation_config
 
             delegation_cfg = _load_delegation_config() or {}
-            route_guidance = _build_delegate_route_guidance(delegation_cfg.get("routes"))
+            route_guidance = _build_delegate_route_guidance(
+                delegation_cfg.get("routes"),
+                default_route=delegation_cfg.get("default_route"),
+            )
             if route_guidance:
                 for i, td in enumerate(filtered_tools):
                     if td.get("function", {}).get("name") != "delegate_task":

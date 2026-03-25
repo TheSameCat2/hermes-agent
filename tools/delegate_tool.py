@@ -475,7 +475,7 @@ def delegate_task(
     children = []
     try:
         for i, t in enumerate(task_list):
-            task_route = str(t.get("route") or route or "").strip()
+            task_route = _resolve_effective_delegation_route(cfg, t, route)
             try:
                 selected_cfg = _select_delegation_config(cfg, task_route)
                 creds = _resolve_delegation_credentials(selected_cfg, parent_agent)
@@ -688,13 +688,33 @@ def _select_delegation_config(cfg: dict, route: Optional[str]) -> dict:
     return merged_cfg
 
 
+def _resolve_effective_delegation_route(
+    cfg: dict,
+    task: dict,
+    top_level_route: Optional[str],
+) -> Optional[str]:
+    """Resolve the effective route with task > top-level > config default precedence."""
+    if isinstance(task, dict) and "route" in task:
+        task_route = str(task.get("route") or "").strip()
+        if task_route:
+            return task_route
+
+    normalized_top = str(top_level_route or "").strip()
+    if normalized_top:
+        return normalized_top
+
+    normalized_default = str((cfg or {}).get("default_route") or "").strip()
+    return normalized_default or None
+
+
 def _load_config() -> dict:
     """Load delegation config from CLI_CONFIG or persistent config.
 
     Checks the runtime config (cli.py CLI_CONFIG) first, then falls back
     to the persistent config (hermes_cli/config.py load_config()) so that
-    ``delegation.model`` / ``delegation.provider`` / ``delegation.routes``
-    are picked up regardless of the entry point (CLI, gateway, cron).
+    ``delegation.model`` / ``delegation.provider`` / ``delegation.routes`` /
+    ``delegation.default_route`` are picked up regardless of the entry point
+    (CLI, gateway, cron).
     """
     try:
         from cli import CLI_CONFIG

@@ -146,3 +146,22 @@ class TestDynamicDelegateRouteGuidance:
 
         assert "Prefer cheap/light routes for" in desc
         assert "Prefer strong/heavy routes for" in desc
+
+    def test_delegate_schema_mentions_default_route_when_configured(self, monkeypatch):
+        monkeypatch.setattr(
+            "tools.delegate_tool._load_config",
+            lambda: {
+                "default_route": "cheap",
+                "routes": {
+                    "cheap": {"model": "openai/gpt-5.4-mini"},
+                    "strong": {"model": "openai/gpt-5.4"},
+                }
+            },
+        )
+
+        schema = self._delegate_schema()
+        desc = schema["description"]
+        route_desc = schema["parameters"]["properties"]["route"]["description"]
+
+        assert "Default route when omitted in this session: cheap" in desc
+        assert "Omit route to use the default route (cheap)" in route_desc

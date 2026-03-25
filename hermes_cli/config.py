@@ -313,6 +313,7 @@ DEFAULT_CONFIG = {
     # Uses the same runtime provider resolution as CLI/gateway startup, so all
     # configured providers (OpenRouter, Nous, Z.ai, Kimi, etc.) are supported.
     "delegation": {
+        "default_route": "", # named route used when delegate_task omits route
         "model": "",       # e.g. "google/gemini-3-flash-preview" (empty = inherit parent model)
         "provider": "",    # e.g. "openrouter" (empty = inherit parent provider + credentials)
         "base_url": "",    # direct OpenAI-compatible endpoint for subagents
@@ -381,7 +382,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 11,
+    "_config_version": 12,
 }
 
 # =============================================================================

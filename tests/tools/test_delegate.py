@@ -179,6 +179,41 @@ class TestDelegateTask(unittest.TestCase):
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_default_route_applies_when_route_omitted(self, mock_creds, mock_cfg):
+        """When no route is provided, delegation.default_route should be used."""
+        mock_cfg.return_value = {
+            "default_route": "cheap",
+            "routes": {
+                "cheap": {
+                    "model": "openai/gpt-5.4-mini",
+                    "provider": "openrouter",
+                }
+            }
+        }
+        mock_creds.return_value = {
+            "model": "openai/gpt-5.4-mini",
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "***",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent()
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Fix tests", parent_agent=parent)
+
+        selected_cfg = mock_creds.call_args.args[0]
+        self.assertEqual(selected_cfg["model"], "openai/gpt-5.4-mini")
+        self.assertEqual(selected_cfg["provider"], "openrouter")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
     def test_task_route_overrides_top_level_route_in_batch(self, mock_creds, mock_cfg):
         """Per-task route should override the top-level route in batch mode."""
         mock_cfg.return_value = {
@@ -213,6 +248,52 @@ class TestDelegateTask(unittest.TestCase):
 
             delegate_task(
                 route="cheap",
+                tasks=[
+                    {"goal": "Summarize failures"},
+                    {"goal": "Root-cause race", "route": "strong"},
+                ],
+                parent_agent=parent,
+            )
+
+        self.assertEqual(mock_build.call_args_list[0].kwargs["model"], "openai/gpt-5.4-mini")
+        self.assertEqual(mock_build.call_args_list[1].kwargs["model"], "openai/gpt-5.4")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_default_route_used_for_omitted_tasks_but_explicit_task_route_wins(self, mock_creds, mock_cfg):
+        """Batch tasks should inherit default_route unless a task explicitly overrides it."""
+        mock_cfg.return_value = {
+            "default_route": "cheap",
+            "routes": {
+                "cheap": {"model": "openai/gpt-5.4-mini", "provider": "openrouter"},
+                "strong": {"model": "openai/gpt-5.4", "provider": "openrouter"},
+            }
+        }
+
+        def _creds_side_effect(cfg, _parent):
+            return {
+                "model": cfg.get("model"),
+                "provider": cfg.get("provider"),
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": f"key-for-{cfg.get('model')}",
+                "api_mode": "chat_completions",
+            }
+
+        mock_creds.side_effect = _creds_side_effect
+        parent = _make_mock_parent()
+
+        with patch("tools.delegate_tool._build_child_agent") as mock_build, \
+             patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_build.return_value = MagicMock()
+            mock_run.return_value = {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "Done",
+                "api_calls": 1,
+                "duration_seconds": 1.0,
+            }
+
+            delegate_task(
                 tasks=[
                     {"goal": "Summarize failures"},
                     {"goal": "Root-cause race", "route": "strong"},
