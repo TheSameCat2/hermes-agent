@@ -78,6 +78,43 @@ class TestBuildToolPreview:
         assert result is not None
         assert "find something" in result
 
+    def test_delegate_task_preview_includes_effective_model(self, monkeypatch):
+        monkeypatch.setattr(
+            "tools.delegate_tool._load_config",
+            lambda: {
+                "default_route": "cheap",
+                "routes": {
+                    "cheap": {"model": "gpt-5.4-mini"},
+                    "strong": {"model": "gpt-5.4"},
+                },
+            },
+        )
+        result = build_tool_preview("delegate_task", {"goal": "Summarize failures"})
+        assert result == "delegate_task (gpt-5.4-mini)"
+
+    def test_delegate_task_preview_handles_mixed_batch_models(self, monkeypatch):
+        monkeypatch.setattr(
+            "tools.delegate_tool._load_config",
+            lambda: {
+                "default_route": "cheap",
+                "routes": {
+                    "cheap": {"model": "gpt-5.4-mini"},
+                    "strong": {"model": "gpt-5.4"},
+                },
+            },
+        )
+        result = build_tool_preview(
+            "delegate_task",
+            {
+                "tasks": [
+                    {"goal": "Summarize failures"},
+                    {"goal": "Debug race", "route": "strong"},
+                ]
+            },
+            max_len=80,
+        )
+        assert result == "delegate_task (gpt-5.4-mini, gpt-5.4)"
+
     def test_false_like_args_zero(self):
         """Non-dict falsy values should return None, not crash."""
         assert build_tool_preview("terminal", 0) is None

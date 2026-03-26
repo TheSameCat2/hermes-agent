@@ -94,6 +94,53 @@ def _oneline(text: str) -> str:
     return " ".join(text.split())
 
 
+def _resolve_delegate_task_models(args: dict, current_model: str | None = None) -> list[str]:
+    """Resolve the effective model(s) a delegate_task call will use for display."""
+    if not isinstance(args, dict):
+        return []
+
+    try:
+        from tools.delegate_tool import (
+            _load_config,
+            _resolve_effective_delegation_route,
+            _select_delegation_config,
+        )
+
+        cfg = _load_config() or {}
+    except Exception:
+        cfg = {}
+
+    top_level_route = args.get("route") if isinstance(args, dict) else None
+    tasks = args.get("tasks") if isinstance(args.get("tasks"), list) and args.get("tasks") else [args]
+
+    models: list[str] = []
+    for task in tasks:
+        task_dict = task if isinstance(task, dict) else {}
+        try:
+            effective_route = _resolve_effective_delegation_route(cfg, task_dict, top_level_route)
+            selected_cfg = _select_delegation_config(cfg, effective_route)
+        except Exception:
+            selected_cfg = cfg
+
+        model = str((selected_cfg or {}).get("model") or current_model or "").strip()
+        if model and model not in models:
+            models.append(model)
+
+    return models
+
+
+def build_delegate_task_progress_label(args: dict, current_model: str | None = None, max_len: int = 60) -> str | None:
+    """Return a compact delegate_task label including the effective model(s)."""
+    models = _resolve_delegate_task_models(args, current_model=current_model)
+    if not models:
+        return None
+
+    label = f"delegate_task ({', '.join(models)})"
+    if len(label) > max_len:
+        label = label[: max_len - 3] + "..."
+    return label
+
+
 def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | None:
     """Build a short preview of a tool call's primary argument for display."""
     if not args:
@@ -110,6 +157,11 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | N
         "execute_code": "code", "delegate_task": "goal",
         "clarify": "question", "skill_manage": "name",
     }
+
+    if tool_name == "delegate_task":
+        delegate_label = build_delegate_task_progress_label(args, max_len=max_len)
+        if delegate_label:
+            return delegate_label
 
     if tool_name == "process":
         action = args.get("action", "")

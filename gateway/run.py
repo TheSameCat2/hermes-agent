@@ -4956,7 +4956,11 @@ class GatewayRunner:
                 progress_queue.put(msg)
                 return
             
-            if preview:
+            if tool_name == "delegate_task":
+                from agent.display import build_delegate_task_progress_label
+                label = build_delegate_task_progress_label(args or {}, max_len=80)
+                msg = f"{emoji} {label}..." if label else f"{emoji} {tool_name}..."
+            elif preview:
                 # Truncate preview to keep messages clean
                 if len(preview) > 80:
                     preview = preview[:77] + "..."

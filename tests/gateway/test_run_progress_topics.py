@@ -71,6 +71,25 @@ class FakeAgent:
         }
 
 
+class FakeDelegateAgent:
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        self.tool_progress_callback(
+            "delegate_task",
+            None,
+            {"tasks": [{"goal": "Summarize failures"}]},
+        )
+        time.sleep(0.35)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 def _make_runner(adapter):
     gateway_run = importlib.import_module("gateway.run")
     GatewayRunner = gateway_run.GatewayRunner
@@ -105,7 +124,7 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
     source = SessionSource(
         platform=Platform.TELEGRAM,
         chat_id="-1001",
@@ -133,3 +152,57 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
     ]
     assert adapter.edits
     assert all(call["metadata"] == {"thread_id": "17585"} for call in adapter.typing)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_progress_shows_delegate_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeDelegateAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    monkeypatch.setattr(
+        "tools.delegate_tool._load_config",
+        lambda: {
+            "default_route": "cheap",
+            "routes": {
+                "cheap": {"model": "gpt-5.4-mini"},
+            },
+        },
+    )
+
+    adapter = ProgressCaptureAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="-1001",
+        chat_type="group",
+        thread_id="17585",
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-1",
+        session_key="agent:main:telegram:group:-1001:17585",
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.sent == [
+        {
+            "chat_id": "-1001",
+            "content": '🔀 delegate_task (gpt-5.4-mini)...',
+            "reply_to": None,
+            "metadata": {"thread_id": "17585"},
+        }
+    ]

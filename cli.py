@@ -4647,9 +4647,13 @@ class HermesCLI:
         spinner and next response).  Also plays audio cue in voice mode.
         """
         if not function_name.startswith("_"):
-            from agent.display import get_tool_emoji
+            from agent.display import get_tool_emoji, build_delegate_task_progress_label
             emoji = get_tool_emoji(function_name)
-            label = preview or function_name
+            if function_name == "delegate_task":
+                label = build_delegate_task_progress_label(function_args or {}, current_model=self.model, max_len=50)
+                label = label or preview or function_name
+            else:
+                label = preview or function_name
             if len(label) > 50:
                 label = label[:47] + "..."
             self._spinner_text = f"{emoji} {label}"
